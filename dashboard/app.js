@@ -28,14 +28,15 @@
   }
   // The model in one function: the page recomputes a row from the snapshot
   // figures and checks the number board.json carries, so the page's code and
-  // the board's data are visibly the same arithmetic.
+  // the board's data are visibly the same arithmetic. The fitted power law:
+  // exp(intercept + slope * ln TVL), times the fitted multipliers.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
+    var growthMult = Math.max(0.05, 1 + (growth / 100) * model.growth_weight);
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     var breadth = 1 + Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_chains) * model.breadth_per_chain;
-    return Math.max(1, Math.round(row.tvl_usd * row.comp_multiple * growthMult * maturity * breadth));
+    return Math.max(1, Math.round(Math.exp(row.intercept + row.slope * Math.log(row.tvl_usd)) * growthMult * maturity * breadth));
   }
 
   function el(tag, attrs) {
@@ -170,7 +171,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else if (key === 'multiple') { av = a.comp_multiple; bv = b.comp_multiple; }
+      else if (key === 'intercept') { av = a.intercept; bv = b.intercept; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -184,7 +185,7 @@
       el('div', { class: 'top-meta' },
         el('span', { text: 'Snapshot ' + DATA.as_of }),
         el('span', { text: 'DefiLlama protocol index' }),
-        el('span', { text: DATA.model_version + ' model, comps-calibrated' })
+        el('span', { text: DATA.model_version + ' model, fitted + held-out tested' })
       )
     );
   }
@@ -272,7 +273,7 @@
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
-        el('td', { class: 'num', text: r.comp_multiple.toFixed(2) + 'x' }),
+        el('td', { class: 'num', text: r.intercept.toFixed(2) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
@@ -291,7 +292,7 @@
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
-            sortHeader('multiple', 'Comp x'),
+            sortHeader('intercept', 'Intercept'),
             sortHeader('implied', 'Implied value'),
             el('th', { scope: 'col', text: 'Set' })
           )),
@@ -316,7 +317,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market caps per dollar of TVL calibrate it.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking, and their market caps fit the power law that calibrates it.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -330,9 +331,10 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x comp_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.breadth_max_chains + ') x ' + m.breadth_per_chain + ') )'
+        'implied = round( exp(intercept + ' + m.slope.toFixed(4) + ' x ln(tvl_usd)) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.breadth_max_chains + ') x ' + m.breadth_per_chain + ') )'
       ),
-      el('p', { class: 'sub', text: 'comp_multiple is the median market cap per dollar of TVL among the live-token protocols in the same category (at least ' + m.min_comps + ' of them), or the global median of ' + DATA.global_multiple.toFixed(2) + 'x when a category has too few live tokens; it is clamped to ' + m.multiple_floor + 'x..' + m.multiple_cap + 'x. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Chain breadth rewards distribution across chains, at most +8%.' }),
+      el('p', { class: 'sub', text: 'The intercept is fitted, not picked: log(market cap) = intercept + ' + m.slope.toFixed(4) + ' x log(TVL), least squares on the ' + m.n_live + ' live-token protocols in this same snapshot, one intercept per category with at least ' + m.min_comps + ' live comps, else the global intercept of ' + DATA.global_intercept.toFixed(2) + '. The slope is about 0.45, so a market cap grows with the square root of TVL, not in proportion to it. The multiplier weights are fitted the same way, by two-fold cross-validation on those live tokens: each weight is kept only when it lowers the held-out error. Chain breadth did not (weight 0: the term drops out). TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' }),
+      el('div', { class: 'note' }, el('b', { text: 'Held-out validation. ' }), 'Two folds, live-token protocols only: this model\u2019s median |log error| is ' + DATA.validation.held_out_med_log_err.toFixed(2) + ' (median |% error| ' + Math.round(DATA.validation.held_out_med_pct_err * 100) + '%), against ' + DATA.validation.baseline_med_log_err.toFixed(2) + ' for the median-multiple model it replaces (' + Math.round(DATA.validation.baseline_med_pct_err * 100) + '%). The power law alone, with no multipliers, is ' + DATA.validation.power_law_only_med_log_err.toFixed(2) + '; dropping growth gives ' + DATA.validation.no_growth_med_log_err.toFixed(2) + ' and dropping maturity gives ' + DATA.validation.no_maturity_med_log_err.toFixed(2) + '. The program measures these on every run from the snapshot alone.') ,
       el('div', { class: 'note' }, el('b', { text: 'What "no token" means. ' }), 'A protocol here records no token in the snapshot: its market cap, CoinGecko id and symbol are all null. That is DefiLlama\u2019s record, not proof it has none. Likewise, an implied value is this model\u2019s claim about a launch, never a price, and it says nothing about whether or when a token is issued.')
     );
   }
@@ -342,17 +344,18 @@
     DATA.comps.forEach(function (c) {
       tbody.appendChild(el('tr', null,
         el('td', null, el('b', { text: c.category })),
-        el('td', { class: 'num', text: c.multiple.toFixed(2) + 'x' }),
+        el('td', { class: 'num', text: c.intercept.toFixed(2) }),
+        el('td', { class: 'num', text: fmtUsd(c.value_at_100m) }),
         el('td', { class: 'num', text: String(c.n) }),
-        el('td', null, el('span', { class: 'sub', text: c.source === 'category' ? 'category median' : 'global median' }))
+        el('td', null, el('span', { class: 'sub', text: c.source === 'category' ? 'own intercept' : 'global fallback' }))
       ));
     });
     return el('section', { class: 'panel comps' },
-      el('h2', { text: 'Calibration: what live tokens pay per dollar of TVL' }),
-      el('p', { class: 'sub', text: 'Median market cap / TVL among the live-token protocols of each category in this same snapshot. Categories with fewer than ' + DATA.model.min_comps + ' live tokens use the global median of ' + DATA.global_multiple.toFixed(2) + 'x instead; the dashboard names that on the row.' }),
+      el('h2', { text: 'Calibration: what the fitted model pays per category' }),
+      el('p', { class: 'sub', text: 'Fitted log-scale intercepts from log(market cap) = intercept + slope x log(TVL), least squares on the live-token protocols of this same snapshot. A category earns its own intercept with at least ' + DATA.model.min_comps + ' live tokens; the value at $100M TVL is what the model pays a protocol of that size before the multipliers. The dashboard names the fallback on the row.' }),
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', class: 'num', text: 'Multiple' }), el('th', { scope: 'col', class: 'num', text: 'Live comps' }), el('th', { scope: 'col', text: 'Source' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', class: 'num', text: 'Intercept' }), el('th', { scope: 'col', class: 'num', text: 'Value at $100M TVL' }), el('th', { scope: 'col', class: 'num', text: 'Live comps' }), el('th', { scope: 'col', text: 'Source' }))),
           tbody
         )
       )
@@ -413,7 +416,7 @@
       el('h3', { text: 'Who is set aside, and why' }),
       el('p', { class: 'sub', text: DATA.excluded_above_floor + ' pre-token protocols above the floor are left out because the watchlist leaves them out. The watchlist was built with parentProtocol data the snapshot does not carry, so an above-floor omission is the house\u2019s exclusion, not an oversight this entry can verify away: WBTC and Binance staked ETH are wrapped or staked products of tokens that already trade, USDT0 is a bridged product, and Sentora Curator and Polymarket International are products of a parent protocol. ' + DATA.live_size + ' live-token protocols are shown separately with their market caps.' }),
       el('h3', { text: 'How to use the board' }),
-      el('p', { class: 'sub', text: 'Start at the top, but read the row before farming it: a high implied value on a young protocol with fast growth is a different bet from the same value on an old, flat one. Check the comp multiple (a category median, or the global fallback), the farm plan\u2019s capital and hold time, and whether the protocol has a points page of its own before you deposit. Never pay to claim, and never sign a transaction a stranger sent you.' }),
+      el('p', { class: 'sub', text: 'Start at the top, but read the row before farming it: a high implied value on a young protocol with fast growth is a different bet from the same value on an old, flat one. Check the category intercept (its own fit, or the global fallback), the farm plan\u2019s capital and hold time, and whether the protocol has a points page of its own before you deposit. Never pay to claim, and never sign a transaction a stranger sent you.' }),
       el('h3', { text: 'Limits' }),
       el('p', { class: 'sub', text: 'One snapshot, one date (' + DATA.as_of + '): TVL, growth and market caps move daily. The model values a launch as if the record stayed as it is; it does not predict a launch, a date, an airdrop or a price. Farm plans are generic steps derived from category, chain, TVL and age, not advice about any one protocol\u2019s points program.' })
     );
@@ -442,7 +445,8 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Comp multiple' }), el('b', { class: 'num', text: row.comp_multiple.toFixed(2) + 'x' })),
+        el('div', null, el('span', { text: 'Category intercept' }), el('b', { class: 'num', text: row.intercept.toFixed(2) })),
+        el('div', null, el('span', { text: 'Value before multipliers' }), el('b', { class: 'num', text: fmtUsd(row.value_base) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: row.growth_multiplier.toFixed(4) })),
@@ -450,10 +454,11 @@
         el('div', null, el('span', { text: 'Breadth multiplier' }), el('b', { class: 'num', text: row.breadth_multiplier.toFixed(4) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Comp multiple: ' + (row.comp_source === 'category' ? 'median of ' + row.comp_n + ' live-token protocols in ' + (row.category || 'this category') : 'global median \u2014 this category has fewer than ' + DATA.model.min_comps + ' live tokens in the snapshot') + '. Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Intercept: ' + (row.comp_source === 'category' ? 'fitted from ' + row.comp_n + ' live-token protocols in ' + (row.category || 'this category') : 'global fit \u2014 this category has fewer than ' + DATA.model.min_comps + ' live tokens in the snapshot') + ', slope ' + DATA.model.slope.toFixed(4) + '. Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
+      el('p', { class: 'sub', text: 'Plan total: $' + capitalFor(row) + ' of capital, a hold of ' + holdDaysFor(row.age_days) + ' days, plus about $5 of gas on Ethereum, under $1 on Solana, about $2 elsewhere. No fee to claim, ever.' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
         var action = at >= 0 ? s.slice(0, at) : s;
