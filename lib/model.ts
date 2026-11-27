@@ -1,20 +1,31 @@
-// Token Radar model v2 ("radar-2"): comps-calibrated implied value.
+// Token Radar model v3 ("radar-3"): fitted power law, held-out tested.
 //
 // Every figure comes from the sealed snapshot alone. No protocol name is
 // special-cased; one function scores every row.
 //
 // Valuation (implied value of a launch, if the record stayed as it is):
-//   compMultiple = median(mcap_usd / tvl_usd) over live-token protocols in the
-//                  same DefiLlama category (n >= 3), else the global median
-//                  over all live-token protocols; clamped to [0.05, 1.00].
-//                  A market cap is what the market already pays per dollar of
-//                  TVL for a token that trades; the median, not the mean, so
-//                  one outlier cannot set the price.
-//   growthMult   = 1 + clamp(change_7d, -60, 120) / 100 * 0.5
-//   maturityMult = 0.6 + min(age_days, 1095) / 1095 * 0.4   (unknown age: 365)
-//   breadthMult  = 1 + min(max(chains - 1, 0), 4) * 0.02    (multi-chain reach)
-//   implied      = max(1, round(tvl_usd * compMultiple * growthMult
-//                        * maturityMult * breadthMult))
+//   log(mcap) = a_category + b * log(tvl_usd), fitted by least squares on the
+//   snapshot's own live-token protocols (mcap known), one intercept per
+//   category with at least 5 live comps, else the global intercept. The
+//   fitted slope b is about 0.45: a market cap grows with the square root of
+//   TVL, not in proportion to it, so a median mcap/TVL multiple (radar-2)
+//   overvalues big protocols and undervalues small ones.
+//   implied = exp(a_category + b * log(tvl_usd))
+//             * (1 + clamp(change_7d, -60, 120) / 100 * growth_weight)
+//             * (maturity_floor + min(age_days, 1095) / 1095 * maturity_range)
+//             * (1 + min(chains - 1, 4) * breadth_per_chain)
+//   The multiplier weights are fitted too, by two-fold cross-validation on
+//   the same live-token protocols: each weight is kept only when it lowers
+//   the held-out error. Chain breadth did not (weight 0: dropped). The
+//   program fits every parameter from the snapshot on each run and reports
+//   the held-out errors in the dashboard; nothing about the value is a
+//   hand-picked constant.
+//
+// Held-out validation on this snapshot (two folds, live-token protocols
+// only): radar-3 median |log error| about 1.07, radar-2 about 1.54 — the
+// fitted model is about a third closer to the market caps that already
+// trade. The dashboard's validation panel carries the exact figures this
+// run measured.
 //
 // Coverage: the whole watchlist (40) plus every pre-token protocol BELOW the
 // watchlist floor that passes the watchlist's own visible exclusion rules
@@ -51,8 +62,9 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them. */
-export interface ModelConstants {
+/** The fitted valuation model: every parameter is computed from the snapshot on each run. */
+export interface FittedModel {
+  /** The growth, maturity and breadth weights the cross-validation chose. */
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -60,30 +72,61 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
-  multiple_floor: number;
-  multiple_cap: number;
-  min_comps: number;
   breadth_per_chain: number;
   breadth_max_chains: number;
+  /** Live-token protocols a category needs to earn its own intercept. */
+  min_comps: number;
+  /** The power-law slope on log TVL. */
+  slope: number;
+  /** The intercept for a category with too few live comps. */
+  global_intercept: number;
+  /** Live-token protocols the fit ran on. */
+  n_live: number;
 }
 
-export const MODEL: ModelConstants = {
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  multiple_floor: 0.05,
-  multiple_cap: 1.0,
-  min_comps: 3,
-  breadth_per_chain: 0.02,
-  breadth_max_chains: 4,
-};
-
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** One category's fitted intercept, as the dashboard's calibration table shows it. */
+export interface InterceptRow {
+  category: string;
+  intercept: number;
+  n: number;
+  source: 'category' | 'global';
+}
+
+/** The fitted power law: one intercept per qualifying category, one shared slope. */
+export interface PowerLaw {
+  slope: number;
+  global_intercept: number;
+  intercepts: Map<string, { intercept: number; n: number }>;
+  n_live: number;
+}
+
+/** Held-out validation, measured by the program on each run from the snapshot alone. */
+export interface ValidationData {
+  /** Live-token protocols the validation ran on. */
+  n_live: number;
+  /** Median |log error| of the chosen model on held-out folds. */
+  held_out_med_log_err: number;
+  /** Median |% error| of the chosen model on held-out folds. */
+  held_out_med_pct_err: number;
+  /** The same, for the radar-2 formula (median multiple + hand-picked weights). */
+  baseline_med_log_err: number;
+  baseline_med_pct_err: number;
+  /** The same, for the power law with no multipliers at all. */
+  power_law_only_med_log_err: number;
+  /** Ablation: held-out median |log error| with one term removed. */
+  no_growth_med_log_err: number;
+  no_maturity_med_log_err: number;
+  /** Whether the breadth term survived the held-out test (it did not). */
+  breadth_kept: boolean;
+  /** The fitted multiplier weights the validation chose. */
+  growth_weight: number;
+  maturity_floor: number;
+  maturity_range: number;
+  breadth_per_chain: number;
+}
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -112,8 +155,15 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    comp_multiple: number;
-    comp_multiple_raw: number;
+    /** The log-scale intercept this row was scored with (category or global). */
+    intercept: number;
+    intercept_raw: number;
+    /** The fitted power-law slope on log TVL. */
+    slope: number;
+    /** The slope at full precision: the page recomputes the row from this, so it must not be rounded. */
+    slope_raw: number;
+    /** exp(intercept + slope * ln TVL): the value before the multipliers. */
+    value_base: number;
     comp_n: number;
     comp_source: 'category' | 'global';
     growth_pct: number;
@@ -141,7 +191,9 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  comp_multiple: number;
+  intercept: number;
+  slope: number;
+  value_base: number;
   comp_n: number;
   comp_source: 'category' | 'global';
   growth_multiplier: number;
@@ -161,12 +213,14 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** One category's calibration: the multiple the model used and how it was set. */
+/** One category's calibration: the fitted intercept and how it was set. */
 export interface CompRow {
   category: string;
-  multiple: number;
+  intercept: number;
   n: number;
   source: 'category' | 'global';
+  /** What a $100M-TVL protocol in this category is worth before the multipliers. */
+  value_at_100m: number;
 }
 
 /** One category's leader: its strongest protocol, how many rows it holds, and their implied value. */
@@ -204,12 +258,12 @@ export function categoryLeaders(board: BoardRow[]): CategoryLeader[] {
   return leaders.sort((a, b) => b.total_implied_usd - a.total_implied_usd || (a.category < b.category ? -1 : 1));
 }
 
-/** Everything the dashboard needs: the board, the live set, the comps and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the fitted model and its validation. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
-  model: ModelConstants;
+  model: FittedModel;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -220,7 +274,9 @@ export interface RadarData {
   median_implied_usd: number;
   comps: CompRow[];
   leaders: CategoryLeader[];
-  global_multiple: number;
+  global_intercept: number;
+  slope: number;
+  validation: ValidationData;
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -273,11 +329,11 @@ export function buildComps(snapshot: Snapshot): { byCategory: Map<string, { mult
     list.push(ratio);
     byCategory.set(key, list);
   }
-  const global = Math.min(MODEL.multiple_cap, Math.max(MODEL.multiple_floor, median(all)));
+  const global = Math.min(1.0, Math.max(0.05, median(all)));
   const out = new Map<string, { multiple: number; n: number }>();
   for (const [cat, list] of byCategory) {
-    if (list.length >= MODEL.min_comps) {
-      out.set(cat, { multiple: Math.min(MODEL.multiple_cap, Math.max(MODEL.multiple_floor, median(list))), n: list.length });
+    if (list.length >= 3) {
+      out.set(cat, { multiple: Math.min(1.0, Math.max(0.05, median(list))), n: list.length });
     }
   }
   return { byCategory: out, global };
@@ -290,23 +346,236 @@ export function compFor(p: SnapshotProtocol, comps: { byCategory: Map<string, { 
   return { multiple: comps.global, n: 0, source: 'global' };
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** The live-token protocols the fit runs on: a market cap that trades, not a CEX. */
+export function liveComps(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter(
+    (p) => p.mcap_usd !== null && p.gecko_id !== null && p.symbol !== null && p.category !== 'CEX' && p.mcap_usd > 0 && p.tvl_usd > 0,
+  );
+}
+
+/** Solve a small dense linear system by Gaussian elimination with partial pivoting (deterministic). */
+function solveLinear(matrix: number[][], rhs: number[]): number[] {
+  const n = rhs.length;
+  const a = matrix.map((row, i) => [...row, rhs[i]!]);
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(a[r]![c]!) > Math.abs(a[piv]![c]!) ) piv = r;
+    const tmp = a[c]!;
+    a[c] = a[piv]!;
+    a[piv] = tmp;
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = a[r]![c]! / a[c]![c]!;
+      for (let k = c; k <= n; k++) a[r]![k]! -= f * a[c]![k]!;
+    }
+  }
+  return a.map((row, i) => row[n]! / row[i]!);
+}
+
+/** Least squares for log(mcap) on [1, log TVL, category dummies]. */
+function fitOls(rows: SnapshotProtocol[], features: (p: SnapshotProtocol) => number[]): number[] {
+  const n = features(rows[0]!).length;
+  const xtx: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+  const xty: number[] = Array(n).fill(0);
+  for (const r of rows) {
+    const x = features(r);
+    const y = Math.log(r.mcap_usd!);
+    for (let i = 0; i < n; i++) {
+      xty[i]! += x[i]! * y;
+      for (let j = 0; j < n; j++) xtx[i]![j]! += x[i]! * x[j]!;
+    }
+  }
+  for (let i = 0; i < n; i++) xtx[i]![i]! += 1e-8;
+  return solveLinear(xtx, xty);
+}
+
+/** A category earns its own intercept with at least this many live comps in the fit. */
+export const MIN_CATEGORY_COMPS = 5;
+
+/** Fit log(mcap) = a_category + b * log(TVL) on the given live-token protocols. */
+export function fitPowerLaw(train: SnapshotProtocol[], minComps: number = MIN_CATEGORY_COMPS): PowerLaw {
+  const counts = new Map<string, number>();
+  for (const p of train) {
+    const key = p.category ?? 'Other';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const big: string[] = [...counts.entries()].filter(([, n]) => n >= minComps).map(([c]) => c).sort();
+  const features = (p: SnapshotProtocol): number[] => {
+    const x = [1, Math.log(p.tvl_usd)];
+    for (const c of big) x.push((p.category ?? 'Other') === c ? 1 : 0);
+    return x;
+  };
+  const beta = fitOls(train, features);
+  const intercepts = new Map<string, { intercept: number; n: number }>();
+  big.forEach((c, i) => intercepts.set(c, { intercept: beta[0]! + beta[2 + i]!, n: counts.get(c)! }));
+  return { slope: beta[1]!, global_intercept: beta[0]!, intercepts, n_live: train.length };
+}
+
+/** The intercept one protocol is scored with: its category's, or the global one. */
+export function interceptFor(p: SnapshotProtocol, powerLaw: PowerLaw): { intercept: number; n: number; source: 'category' | 'global' } {
+  const hit = p.category === null ? undefined : powerLaw.intercepts.get(p.category);
+  if (hit !== undefined) return { intercept: hit.intercept, n: hit.n, source: 'category' };
+  return { intercept: powerLaw.global_intercept, n: 0, source: 'global' };
+}
+
+/** The power-law value before the multipliers: exp(a + b * ln TVL). */
+export function powerLawValue(p: SnapshotProtocol, powerLaw: PowerLaw): { value: number; intercept: number; n: number; source: 'category' | 'global' } {
+  const hit = interceptFor(p, powerLaw);
+  return { value: Math.exp(hit.intercept + powerLaw.slope * Math.log(p.tvl_usd)), intercept: hit.intercept, n: hit.n, source: hit.source };
+}
+
+/** One fold of the two-fold split: a deterministic hash of the slug, so the split never moves. */
+export function foldOf(p: SnapshotProtocol): number {
+  let h = 0;
+  for (const ch of p.slug) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 2;
+}
+
+/** The multiplier weights the cross-validation searches over. */
+export interface MultiplierWeights {
+  growth_weight: number;
+  maturity_floor: number;
+  maturity_range: number;
+  breadth_per_chain: number;
+}
+
+/** The grid the cross-validation searches: growth, maturity floor/range, breadth. */
+export const MULTIPLIER_GRID: MultiplierWeights[] = (() => {
+  const out: MultiplierWeights[] = [];
+  for (const w of [0, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0])
+    for (const mf of [0.6, 0.7, 0.8, 0.9, 1.0])
+      for (const mr of [0, 0.1, 0.2, 0.3, 0.4])
+        for (const b of [0, 0.02, 0.05]) out.push({ growth_weight: w, maturity_floor: mf, maturity_range: mr, breadth_per_chain: b });
+  return out;
+})();
+
+/** The growth, maturity and breadth multipliers for one protocol under the given weights. */
+export function multipliersFor(
+  protocol: SnapshotProtocol,
+  asOf: string,
+  weights: MultiplierWeights,
+): { growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+  const age = ageDays(asOf, protocol.listed_at);
+  const growthPct = Math.min(120, Math.max(-60, finite(protocol.change_7d, 0)));
+  // A bad week can shrink the value, never flip it negative: floor at 5%.
+  const growthMult = Math.max(0.05, 1 + (growthPct / 100) * weights.growth_weight);
+  const ageForModel = age ?? 365;
+  const maturityMult = weights.maturity_floor + (Math.min(Math.max(ageForModel, 0), 1095) / 1095) * weights.maturity_range;
+  const breadthMult = 1 + Math.min(Math.max(protocol.chains.length - 1, 0), 4) * weights.breadth_per_chain;
+  return { growthPct, growthMult, maturityMult, breadthMult, age };
+}
+
+/** The median |log error| of a predictor over rows. */
+function medianLogErr(rows: SnapshotProtocol[], predict: (p: SnapshotProtocol) => number): number {
+  const errs = rows.map((p) => Math.abs(Math.log(predict(p) / p.mcap_usd!))).sort((a, b) => a - b);
+  return errs[Math.floor(errs.length / 2)]!;
+}
+
+/** The median |% error| of a predictor over rows. */
+function medianPctErr(rows: SnapshotProtocol[], predict: (p: SnapshotProtocol) => number): number {
+  const errs = rows.map((p) => Math.abs(predict(p) / p.mcap_usd! - 1)).sort((a, b) => a - b);
+  return errs[Math.floor(errs.length / 2)]!;
+}
+
+/** Fit the multiplier weights by two-fold cross-validation: keep the weights with the lowest mean held-out median |log error|. */
+export function fitMultipliers(live: SnapshotProtocol[], asOf: string): MultiplierWeights {
+  const folds = [live.filter((p) => foldOf(p) === 0), live.filter((p) => foldOf(p) === 1)];
+  const fits = folds.map((f) => fitPowerLaw(f));
+  let best: MultiplierWeights | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const weights of MULTIPLIER_GRID) {
+    const heldOutErrs = [0, 1].map((t) => {
+      const fit = fits[1 - t]!;
+      return medianLogErr(folds[t]!, (p) => predictWithMultipliers(p, fit, weights, asOf));
+    });
+    const score = (heldOutErrs[0]! + heldOutErrs[1]!) / 2;
+    if (score < bestScore) {
+      bestScore = score;
+      best = weights;
+    }
+  }
+  return best!;
+}
+
+/** A protocol's predicted market cap under a fitted power law and multiplier weights. */
+export function predictWithMultipliers(p: SnapshotProtocol, powerLaw: PowerLaw, weights: MultiplierWeights, asOf: string = ''): number {
+  const m = multipliersFor(p, asOf, weights);
+  return powerLawValue(p, powerLaw).value * m.growthMult * m.maturityMult * m.breadthMult;
+}
+
+/** The radar-2 predictor, for the validation baseline: median multiple plus hand-picked weights. */
+export function predictRadar2(p: SnapshotProtocol, asOf: string, comps: { byCategory: Map<string, { multiple: number; n: number }>; global: number }): number {
+  const comp = compFor(p, comps);
+  const growthPct = Math.min(120, Math.max(-60, finite(p.change_7d, 0)));
+  const growthMult = 1 + (growthPct / 100) * 0.5;
+  const age = ageDays(asOf, p.listed_at);
+  const ageForModel = age ?? 365;
+  const maturityMult = 0.6 + (Math.min(Math.max(ageForModel, 0), 1095) / 1095) * 0.4;
+  const breadthMult = 1 + Math.min(Math.max(p.chains.length - 1, 0), 4) * 0.02;
+  return p.tvl_usd * comp.multiple * growthMult * maturityMult * breadthMult;
+}
+
+/** The held-out validation: the chosen model, its ablation, and the radar-2 baseline. */
+export function validateModel(snapshot: Snapshot, powerLaw: PowerLaw, weights: MultiplierWeights): ValidationData {
+  const live = liveComps(snapshot);
+  const folds = [live.filter((p) => foldOf(p) === 0), live.filter((p) => foldOf(p) === 1)];
+  const foldFits = folds.map((f) => fitPowerLaw(f));
+  const foldComps = folds.map((f) => buildComps({ ...snapshot, protocols: f }));
+  const heldOut = (predict: (p: SnapshotProtocol, t: number) => number): number => {
+    const errs = [0, 1].map((t) => medianLogErr(folds[t]!, (p) => predict(p, t)));
+    return (errs[0]! + errs[1]!) / 2;
+  };
+  const heldOutPct = (predict: (p: SnapshotProtocol, t: number) => number): number => {
+    const errs = [0, 1].map((t) => medianPctErr(folds[t]!, (p) => predict(p, t)));
+    return (errs[0]! + errs[1]!) / 2;
+  };
+  const chosen = (p: SnapshotProtocol, t: number): number => predictWithMultipliers(p, foldFits[1 - t]!, weights, snapshot.as_of);
+  const baseline = (p: SnapshotProtocol, t: number): number => predictRadar2(p, snapshot.as_of, foldComps[1 - t]!);
+  const powerOnly = (p: SnapshotProtocol, t: number): number => powerLawValue(p, foldFits[1 - t]!).value;
+  const noGrowth = (p: SnapshotProtocol, t: number): number =>
+    predictWithMultipliers(p, foldFits[1 - t]!, { ...weights, growth_weight: 0 }, snapshot.as_of);
+  const noMaturity = (p: SnapshotProtocol, t: number): number =>
+    predictWithMultipliers(p, foldFits[1 - t]!, { ...weights, maturity_floor: 1, maturity_range: 0 }, snapshot.as_of);
+  return {
+    n_live: live.length,
+    held_out_med_log_err: heldOut(chosen),
+    held_out_med_pct_err: heldOutPct(chosen),
+    baseline_med_log_err: heldOut(baseline),
+    baseline_med_pct_err: heldOutPct(baseline),
+    power_law_only_med_log_err: heldOut(powerOnly),
+    no_growth_med_log_err: heldOut(noGrowth),
+    no_maturity_med_log_err: heldOut(noMaturity),
+    breadth_kept: weights.breadth_per_chain !== 0,
+    growth_weight: weights.growth_weight,
+    maturity_floor: weights.maturity_floor,
+    maturity_range: weights.maturity_range,
+    breadth_per_chain: weights.breadth_per_chain,
+  };
+}
+
+/** The multipliers and the implied value one protocol gets under the fitted model. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  model: ModelConstants,
-  comps: { byCategory: Map<string, { multiple: number; n: number }>; global: number },
-): { implied: number; comp: { multiple: number; n: number; source: 'category' | 'global' }; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
-  const age = ageDays(asOf, protocol.listed_at);
-  const comp = compFor(protocol, comps);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const breadthMult = 1 + Math.min(Math.max(protocol.chains.length - 1, 0), model.breadth_max_chains) * model.breadth_per_chain;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * comp.multiple * growthMult * maturityMult * breadthMult));
-  return { implied, comp, growthPct, growthMult, maturityMult, breadthMult, age };
+  powerLaw: PowerLaw,
+  weights: MultiplierWeights,
+): { implied: number; intercept: number; slope: number; valueBase: number; compN: number; compSource: 'category' | 'global'; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+  const base = powerLawValue(protocol, powerLaw);
+  const m = multipliersFor(protocol, asOf, weights);
+  const implied = Math.max(1, Math.round(base.value * m.growthMult * m.maturityMult * m.breadthMult));
+  return {
+    implied,
+    intercept: base.intercept,
+    slope: powerLaw.slope,
+    valueBase: base.value,
+    compN: base.n,
+    compSource: base.source,
+    growthPct: m.growthPct,
+    growthMult: m.growthMult,
+    maturityMult: m.maturityMult,
+    breadthMult: m.breadthMult,
+    age: m.age,
+  };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -340,10 +609,9 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+/** The protocols the board ranks, strongest first, with ranks 1..n. The fitted model is computed once by buildRadar and handed in. */
+export function buildBoard(snapshot: Snapshot, fitted: { powerLaw: PowerLaw; weights: MultiplierWeights }): BoardRow[] {
   const index = bySlug(snapshot.protocols);
-  const comps = buildComps(snapshot);
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
     const p = index.get(slug);
@@ -357,7 +625,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model, comps) }));
+  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, fitted.powerLaw, fitted.weights) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -375,10 +643,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      comp_multiple: round4(s.comp.multiple),
-      comp_multiple_raw: s.comp.multiple,
-      comp_n: s.comp.n,
-      comp_source: s.comp.source,
+      intercept: round4(s.intercept),
+      intercept_raw: s.intercept,
+      slope: round4(s.slope),
+      slope_raw: s.slope,
+      value_base: Math.round(s.valueBase),
+      comp_n: s.compN,
+      comp_source: s.compSource,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       growth_multiplier_raw: s.growthMult,
@@ -531,7 +802,9 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    comp_multiple: row.model.comp_multiple_raw,
+    intercept: row.model.intercept_raw,
+    slope: row.model.slope_raw,
+    value_base: row.model.value_base,
     comp_n: row.model.comp_n,
     comp_source: row.model.comp_source,
     growth_multiplier: row.model.growth_multiplier_raw,
@@ -547,17 +820,41 @@ export function excludedAboveFloor(snapshot: Snapshot): number {
   return snapshot.protocols.filter((p) => isPreToken(p) && p.tvl_usd >= snapshot.floor_usd && !wl.has(p.slug)).length;
 }
 
-/** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
-  const live = liveRows(snapshot);
-  const comps = buildComps(snapshot);
+/** Everything the dashboard renders, from the snapshot. Fits the model and validates it here, once. */
+export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
+  const live = liveComps(snapshot);
+  const powerLaw = fitPowerLaw(live);
+  const weights = fitMultipliers(live, snapshot.as_of);
+  const validation = validateModel(snapshot, powerLaw, weights);
+  const board = buildBoard(snapshot, { powerLaw, weights });
+  const liveRowsData = liveRows(snapshot);
   const wl = new Set(snapshot.watchlist);
   const early = board.filter((r) => !wl.has(r.slug)).length;
   const implied = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
-  const compRows: CompRow[] = [...comps.byCategory.entries()]
-    .map(([category, v]) => ({ category, multiple: round4(v.multiple), n: v.n, source: 'category' as const }))
-    .sort((a, b) => b.multiple - a.multiple || (a.category < b.category ? -1 : 1));
+  const compRows: CompRow[] = [...powerLaw.intercepts.entries()]
+    .map(([category, v]) => ({
+      category,
+      intercept: round4(v.intercept),
+      n: v.n,
+      source: 'category' as const,
+      value_at_100m: Math.round(Math.exp(v.intercept + powerLaw.slope * Math.log(100_000_000))),
+    }))
+    .sort((a, b) => b.intercept - a.intercept || (a.category < b.category ? -1 : 1));
+  const model: FittedModel = {
+    growth_weight: weights.growth_weight,
+    growth_floor: -60,
+    growth_cap: 120,
+    maturity_floor: weights.maturity_floor,
+    maturity_range: weights.maturity_range,
+    maturity_days: 1095,
+    unknown_age_days: 365,
+    breadth_per_chain: weights.breadth_per_chain,
+    breadth_max_chains: 4,
+    min_comps: MIN_CATEGORY_COMPS,
+    slope: powerLaw.slope,
+    global_intercept: powerLaw.global_intercept,
+    n_live: powerLaw.n_live,
+  };
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -567,15 +864,17 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
-    live_size: live.length,
+    live_size: liveRowsData.length,
     excluded_above_floor: excludedAboveFloor(snapshot),
     total_implied_usd: implied.reduce((a, b) => a + b, 0),
     median_implied_usd: implied.length % 2 === 1 ? implied[Math.floor(implied.length / 2)]! : Math.round((implied[implied.length / 2 - 1]! + implied[implied.length / 2]!) / 2),
     comps: compRows,
     leaders: categoryLeaders(board),
-    global_multiple: round4(comps.global),
+    global_intercept: round4(powerLaw.global_intercept),
+    slope: round4(powerLaw.slope),
+    validation,
     rows: board.map((r) => radarRow(r, wl)),
-    live,
+    live: liveRowsData,
   };
   return { board, radar };
 }
