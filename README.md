@@ -22,29 +22,38 @@ writes `board.json` (178 rows), `data.js` beside the page, copies `dashboard/` a
 `screenshots/`, and writes `dossier.json` with the vendored
 `vendor/makefun-board.ts`.
 
-## Model — radar-2, comps-calibrated
+## Model — radar-3, fitted power law
 
 ```
-implied = round( tvl_usd x comp_multiple
-                 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
+implied = round( exp(intercept + 0.4512 x ln(tvl_usd))
+                 x max(0.05, 1 + clamp(change_7d, -60, 120) / 100 x 1.0)
                  x (0.6 + min(age_days, 1095) / 1095 x 0.4)
-                 x (1 + min(chains - 1, 4) x 0.02) )
+                 x (1 + min(chains - 1, 4) x 0) )
 ```
 
-- **comp_multiple**: the median market cap per dollar of TVL among the
-  live-token protocols in the same DefiLlama category in this same snapshot
-  (at least 3 comps), else the global median (0.25x); clamped to 0.05x–1.00x.
-  A market cap is what the market already pays per dollar of TVL for a token
-  that trades; the median, not the mean, so one outlier cannot set the price.
-- **Growth**: seven-day TVL change, clamped, half-weighted.
+- **Power law, not a multiple**: log(market cap) = intercept + 0.4512 ×
+  log(TVL), least squares on the snapshot's own 119 live-token protocols
+  (market cap known), one intercept per category with at least 5 live comps,
+  else the global intercept (8.24). A market cap grows with the square root
+  of TVL, not in proportion to it, so a median mcap/TVL multiple overvalues
+  big protocols and undervalues small ones.
+- **Growth**: seven-day TVL change, clamped, full-weighted (fitted, not
+  picked); floored at 0.05 so a bad week shrinks the value, never flips it.
 - **Maturity**: time since first listed, up to 3 years; an unlisted age uses
   365 days.
-- **Breadth**: multi-chain distribution, at most +8%.
+- **Breadth**: tested, dropped — the cross-validation found no held-out gain
+  (weight 0), so the term is 1.0 for every row.
+- **Held-out validation** (two folds, live-token protocols only, measured by
+  the program on every run): median |log error| 1.07, against 1.54 for the
+  radar-2 median-multiple model it replaces; the power law alone is 1.19,
+  dropping growth gives 1.11, dropping maturity gives 1.15. Every parameter
+  is fitted from the snapshot on each run; nothing about the value is a
+  hand-picked constant.
 - No protocol name is special-cased; one function scores every row. The
   dashboard recomputes each row live and checks it against `board.json`.
 
-Headline result on this snapshot: 178 rows, total implied value ≈ $3.1B,
-median ≈ $3.7M. Rank 1 is Steakhouse Financial (≈ $578M implied).
+Headline result on this snapshot: 178 rows, total implied value ≈ $1.40B,
+median ≈ $5.3M. Rank 1 is Steakhouse Financial (≈ $53.7M implied).
 
 ## Coverage
 

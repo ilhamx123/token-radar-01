@@ -1,7 +1,7 @@
-// Token Radar radar-2 entry (Node 22, standard library only).
+// Token Radar radar-3 entry (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every pre-token protocol with the comps-calibrated model in
+// scores every pre-token protocol with the fitted power-law model in
 // lib/model.ts, writes the ranked board to /output/board.json, and copies this
 // repository's dashboard/ and screenshots/ to /output. Last, it writes
 // /output/dossier.json with the vendored make.fun library.
@@ -88,5 +88,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.excluded_above_floor} above-floor set aside)\n` +
     `token radar: total implied $${(radar.total_implied_usd / 1e9).toFixed(2)}B, median $${Math.round(radar.median_implied_usd).toLocaleString('en-US')}\n` +
+    `token radar: fitted slope ${radar.slope.toFixed(4)}, global intercept ${radar.global_intercept.toFixed(2)}, growth weight ${radar.model.growth_weight}, maturity ${radar.model.maturity_floor}+${radar.model.maturity_range}, breadth ${radar.model.breadth_per_chain} (n=${radar.model.n_live} live comps)\n` +
+    `token radar: held-out median |log error| ${radar.validation.held_out_med_log_err.toFixed(3)} vs radar-2 baseline ${radar.validation.baseline_med_log_err.toFixed(3)} (power law only ${radar.validation.power_law_only_med_log_err.toFixed(3)}, no growth ${radar.validation.no_growth_med_log_err.toFixed(3)}, no maturity ${radar.validation.no_maturity_med_log_err.toFixed(3)})\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
